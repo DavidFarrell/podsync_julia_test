@@ -20,7 +20,9 @@ WORKDIR /app
 
 RUN apk --no-cache add ca-certificates python3 py3-pip ffmpeg tzdata \
     # https://github.com/golang/go/issues/59305
-    libc6-compat && ln -s /lib/libc.so.6 /usr/lib/libresolv.so.2
+    libc6-compat && ln -s /lib/libc.so.6 /usr/lib/libresolv.so.2 && \
+    # Install Python dependencies for better YouTube support
+    pip3 install --no-cache-dir --break-system-packages pycryptodomex websockets brotli
 
 COPY --from=builder /usr/bin/yt-dlp /usr/bin/youtube-dl
 COPY --from=builder /usr/bin/yt-dlp /usr/bin/yt-dlp
