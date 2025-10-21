@@ -9,7 +9,8 @@ COPY . .
 
 RUN make build
 
-# Download youtube-dl
+# Download youtube-dl - use build arg to bust cache and always get latest
+ARG CACHEBUST=1
 RUN wget -O /usr/bin/yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp && \
     chmod +x /usr/bin/yt-dlp
 
@@ -28,5 +29,13 @@ COPY --from=builder /usr/bin/yt-dlp /usr/bin/youtube-dl
 COPY --from=builder /usr/bin/yt-dlp /usr/bin/yt-dlp
 COPY --from=builder /build/bin/podsync /app/podsync
 
-ENTRYPOINT ["/app/podsync"]
+# Create startup script that updates yt-dlp before running podsync
+RUN echo '#!/bin/sh' > /app/startup.sh && \
+    echo 'echo "Checking for yt-dlp updates..."' >> /app/startup.sh && \
+    echo 'wget -q -O /tmp/yt-dlp-new https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp && chmod +x /tmp/yt-dlp-new && mv /tmp/yt-dlp-new /usr/bin/yt-dlp && echo "yt-dlp updated to $(/usr/bin/yt-dlp --version)"' >> /app/startup.sh && \
+    echo 'cp /usr/bin/yt-dlp /usr/bin/youtube-dl' >> /app/startup.sh && \
+    echo 'exec /app/podsync "$@"' >> /app/startup.sh && \
+    chmod +x /app/startup.sh
+
+ENTRYPOINT ["/app/startup.sh"]
 CMD ["--no-banner"]
