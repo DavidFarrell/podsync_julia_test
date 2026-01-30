@@ -1,4 +1,4 @@
-FROM golang:1.23 as builder
+FROM golang:1.24 AS builder
 
 ENV TAG="nightly"
 ENV COMMIT=""
@@ -21,7 +21,11 @@ WORKDIR /app
 
 RUN apk --no-cache add ca-certificates python3 py3-pip ffmpeg tzdata \
     # https://github.com/golang/go/issues/59305
-    libc6-compat && ln -s /lib/libc.so.6 /usr/lib/libresolv.so.2 && \
+    libc6-compat \
+    # Deno JS runtime required for yt-dlp YouTube challenge solving (EJS)
+    # See: https://github.com/yt-dlp/yt-dlp/wiki/EJS
+    deno && \
+    ln -s /lib/libc.so.6 /usr/lib/libresolv.so.2 && \
     # Install Python dependencies for better YouTube support
     pip3 install --no-cache-dir --break-system-packages pycryptodomex websockets brotli
 
