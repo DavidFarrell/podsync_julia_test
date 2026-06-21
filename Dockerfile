@@ -1,4 +1,4 @@
-FROM golang:1.24 AS builder
+FROM golang:1.25 AS builder
 
 ENV TAG="nightly"
 ENV COMMIT=""
@@ -14,8 +14,14 @@ ARG CACHEBUST=1
 RUN wget -O /usr/bin/yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp && \
     chmod +x /usr/bin/yt-dlp
 
-# Alpine 3.21 will go EOL on 2026-11-01
-FROM alpine:3.21
+# Bumped 3.21 -> 3.24 (2026-06-18): 3.21 ships deno 2.0.6 which current yt-dlp flags
+# "(unsupported)", breaking the YouTube n-challenge (EJS) solver so only image formats
+# are returned. An interim bump to 3.22 (deno 2.3.1) fixed it but sat on yt-dlp's bare
+# minimum deno floor, leaving no headroom against future yt-dlp releases. 3.24 ships
+# deno 2.7.4 (plus newer ffmpeg), matching upstream mxpv/podsync's fix and giving real
+# headroom. deno stays apk-managed and musl-native, matched to the same Alpine release
+# as python3/ffmpeg. Builder is golang:1.25 to match upstream.
+FROM alpine:3.24
 
 WORKDIR /app
 
