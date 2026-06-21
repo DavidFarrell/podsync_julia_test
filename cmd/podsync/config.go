@@ -179,6 +179,9 @@ func (c *Config) applyDefaults(configPath string) {
 		if _feed.PlaylistSort == "" {
 			_feed.PlaylistSort = model.SortingAsc
 		}
+
+		// Coerce strip-ads aggressiveness to a known value (defaults to balanced).
+		_feed.StripAds.Normalize()
 	}
 }
 

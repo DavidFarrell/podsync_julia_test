@@ -44,6 +44,37 @@ type Config struct {
 	PrivateFeed bool `toml:"private_feed"`
 	// Playlist sort
 	PlaylistSort model.Sorting `toml:"playlist_sort"`
+	// StripAds controls the unattended ad-strip pipeline for this feed
+	StripAds StripAds `toml:"strip_ads"`
+}
+
+// StripAds is the per-feed ad-strip configuration. When Enabled, a newly
+// downloaded episode is diverted to the host worker instead of being published;
+// only the cut output is ever served. Default (zero value) is disabled.
+type StripAds struct {
+	// Enabled turns on the divert-and-cut barrier for this feed.
+	Enabled bool `toml:"enabled"`
+	// Aggressiveness is one of conservative|balanced|aggressive. Unknown values
+	// normalise to balanced. The worker maps this to a needs-review threshold.
+	Aggressiveness string `toml:"aggressiveness"`
+}
+
+// Valid aggressiveness keys (internal). The UI relabels these to Safe/Normal/Aggressive.
+const (
+	AggressivenessConservative = "conservative"
+	AggressivenessBalanced     = "balanced"
+	AggressivenessAggressive   = "aggressive"
+)
+
+// Normalize fills the default aggressiveness and coerces any unknown value to
+// balanced, so a typo in the TOML can never widen cuts unexpectedly.
+func (s *StripAds) Normalize() {
+	switch s.Aggressiveness {
+	case AggressivenessConservative, AggressivenessBalanced, AggressivenessAggressive:
+		// already valid
+	default:
+		s.Aggressiveness = AggressivenessBalanced
+	}
 }
 
 type CustomFormat struct {

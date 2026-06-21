@@ -74,4 +74,12 @@ const (
 	EpisodeDownloaded = EpisodeStatus("downloaded") // Downloaded, encoded and available for download
 	EpisodeError      = EpisodeStatus("error")      // Could not download, will retry
 	EpisodeCleaned    = EpisodeStatus("cleaned")    // Downloaded and later removed from disk due to update strategy
+
+	// EpisodeStripProcessing means the raw file was diverted to the host ad-strip
+	// worker and is awaiting a cut result. It is deliberately NOT EpisodeDownloaded,
+	// so xml.go excludes it and the uncut file never enters the feed.
+	EpisodeStripProcessing = EpisodeStatus("strip_processing")
+	// EpisodeStripFailed means ad-strip processing failed (or timed out). The episode
+	// is HELD out of the feed - we never serve the uncut file as a fallback.
+	EpisodeStripFailed = EpisodeStatus("strip_failed")
 )

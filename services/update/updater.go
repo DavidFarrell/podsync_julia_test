@@ -34,6 +34,7 @@ type Manager struct {
 	fs         fs.Storage
 	feeds      map[string]*feed.Config
 	keys       map[model.Provider]feed.KeyProvider
+	adstrip    *adstripBarrier
 }
 
 func NewUpdater(
@@ -51,6 +52,7 @@ func NewUpdater(
 		fs:         fs,
 		feeds:      feeds,
 		keys:       keys,
+		adstrip:    newAdstripBarrier(),
 	}, nil
 }
 
@@ -65,6 +67,14 @@ func (u *Manager) Update(ctx context.Context, feedConfig *feed.Config) error {
 
 	if err := u.updateFeed(ctx, feedConfig); err != nil {
 		return errors.Wrap(err, "update failed")
+	}
+
+	// Publish any ad-strip episodes whose cut results have landed since last cycle,
+	// and hold any that have timed out. Runs before XML is rebuilt below so a
+	// freshly-published episode appears in this cycle's feed. Errors here are
+	// logged, not fatal - a reconcile failure must not stall the feed update.
+	if err := u.reconcileStripAds(ctx, feedConfig); err != nil {
+		log.WithError(err).Error("ad-strip reconcile failed")
 	}
 
 	if err := u.downloadEpisodes(ctx, feedConfig); err != nil {
@@ -251,6 +261,38 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config)
 			continue
 		}
 
+		// Ad-strip feeds: divert the raw download into the unserved staging tree and
+		// enqueue a cut job instead of publishing. The episode goes EpisodeStripProcessing
+		// (excluded from RSS) and is published later by reconcileStripAds once the worker
+		// has produced a validated cut. We never copy the raw into the served tree.
+		if u.adstrip != nil && feedConfig.StripAds.Enabled {
+			err := u.adstrip.divert(feedConfig, episode.ID, episode.Title, tempFile)
+			tempFile.Close()
+			if err != nil {
+				// Could not stage / enqueue. Mark errored so it is retried next cycle;
+				// crucially we did NOT publish the uncut file.
+				logger.WithError(err).Error("failed to divert episode to ad-strip staging")
+				if uerr := u.db.UpdateEpisode(feedID, episode.ID, func(episode *model.Episode) error {
+					episode.Status = model.EpisodeError
+					return nil
+				}); uerr != nil {
+					return uerr
+				}
+				continue
+			}
+
+			logger.Infof("diverted episode %q to ad-strip worker", episode.ID)
+			if err := u.db.UpdateEpisode(feedID, episode.ID, func(episode *model.Episode) error {
+				episode.Status = model.EpisodeStripProcessing
+				return nil
+			}); err != nil {
+				return err
+			}
+
+			downloaded++
+			continue
+		}
+
 		logger.Debug("copying file")
 		fileSize, err := u.fs.Create(ctx, fmt.Sprintf("%s/%s", feedID, episodeName), tempFile)
 		tempFile.Close()
@@ -274,6 +316,105 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config)
 	}
 
 	log.Infof("downloaded %d episode(s)", downloaded)
+	return nil
+}
+
+// reconcileStripAds publishes or holds every episode currently in
+// EpisodeStripProcessing for this feed, based on the worker's result file. A
+// missing result that has not timed out is left untouched (still processing). The
+// uncut file is never served: a hold marks EpisodeStripFailed, and on publish we
+// copy the CUT output, never the raw.
+func (u *Manager) reconcileStripAds(ctx context.Context, feedConfig *feed.Config) error {
+	if u.adstrip == nil || !feedConfig.StripAds.Enabled {
+		return nil
+	}
+
+	var processing []*model.Episode
+	if err := u.db.WalkEpisodes(ctx, feedConfig.ID, func(episode *model.Episode) error {
+		if episode.Status == model.EpisodeStripProcessing {
+			// Copy out of the walk - we mutate the DB below.
+			e := *episode
+			processing = append(processing, &e)
+		}
+		return nil
+	}); err != nil {
+		return errors.Wrap(err, "failed to walk episodes for reconcile")
+	}
+
+	for _, episode := range processing {
+		logger := log.WithFields(log.Fields{"feed_id": feedConfig.ID, "episode_id": episode.ID})
+
+		createdAt, attempt := u.adstrip.loadJobMeta(feedConfig.ID, episode.ID)
+		decision, err := u.adstrip.reconcile(feedConfig.ID, episode.ID, createdAt, attempt)
+		if err != nil {
+			logger.WithError(err).Error("failed to reconcile ad-strip episode")
+			continue
+		}
+
+		switch decision.outcome {
+		case reconcilePending:
+			// Worker still busy (or backlog). Leave it processing.
+			continue
+
+		case reconcileHold:
+			logger.Warnf("holding ad-strip episode: %s", decision.heldReason)
+			if err := u.db.UpdateEpisode(feedConfig.ID, episode.ID, func(e *model.Episode) error {
+				e.Status = model.EpisodeStripFailed
+				return nil
+			}); err != nil {
+				logger.WithError(err).Error("failed to mark episode held")
+			}
+
+		case reconcilePublish:
+			cut, err := u.adstrip.store.OpenOutput(decision.outputPath)
+			if err != nil {
+				// The result said done but the cut is unreadable. Do NOT publish the
+				// raw. Retry on a later cycle, but HOLD once the timeout passes so a
+				// permanently-broken cut cannot strand the episode in processing.
+				if u.adstrip.timedOut(createdAt) {
+					logger.WithError(err).Warn("cut output unreadable past timeout; holding")
+					if uerr := u.db.UpdateEpisode(feedConfig.ID, episode.ID, func(e *model.Episode) error {
+						e.Status = model.EpisodeStripFailed
+						return nil
+					}); uerr != nil {
+						logger.WithError(uerr).Error("failed to mark episode held")
+					}
+				} else {
+					logger.WithError(err).Error("failed to open cut output; leaving processing")
+				}
+				continue
+			}
+
+			episodeName := feed.EpisodeName(feedConfig, episode)
+			size, copyErr := u.fs.Create(ctx, fmt.Sprintf("%s/%s", feedConfig.ID, episodeName), cut)
+			cut.Close()
+			if copyErr != nil {
+				// Same reasoning as the open failure: retry, but hold after timeout.
+				if u.adstrip.timedOut(createdAt) {
+					logger.WithError(copyErr).Warn("cut copy failed past timeout; holding")
+					if uerr := u.db.UpdateEpisode(feedConfig.ID, episode.ID, func(e *model.Episode) error {
+						e.Status = model.EpisodeStripFailed
+						return nil
+					}); uerr != nil {
+						logger.WithError(uerr).Error("failed to mark episode held")
+					}
+				} else {
+					logger.WithError(copyErr).Error("failed to copy cut into served tree; leaving processing")
+				}
+				continue
+			}
+
+			logger.Infof("published ad-stripped episode %q", episode.ID)
+			if err := u.db.UpdateEpisode(feedConfig.ID, episode.ID, func(e *model.Episode) error {
+				e.Size = size
+				e.Status = model.EpisodeDownloaded
+				return nil
+			}); err != nil {
+				logger.WithError(err).Error("failed to mark episode downloaded")
+			}
+		}
+	}
+
 	return nil
 }
 
